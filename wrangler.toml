@@ -1,0 +1,11 @@
+name = "giro-estelar"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+# La cuenta de negocios. Con otra cuenta, wrangler falla en vez de publicar donde no es.
+account_id = "45618f9ff163708f646dbc1030dc1dc5"
+
+# La base de datos (creada el 2026-11-20 con "node cf.mjs d1 create giro-estelar").
+[[d1_databases]]
+binding = "DB"
+database_name = "giro-estelar"
+database_id = "40d1b80c-2f19-4b28-82cd-ca874bdd695c"
