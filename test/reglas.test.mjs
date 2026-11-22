@@ -144,3 +144,56 @@ test('la medición descarta fechas imposibles', async () => {
   assert.equal((await s.call('POST', '/v1/visits', { uid: uid(1), first: '2027-01-01', days: [0] })).status, 400);
   assert.equal(dayFromKey('no es fecha') !== dayFromKey('no es fecha'), true);
 });
+
+test('un reto: se crea con código, otro lo juega en la misma pista y comparten tabla', async () => {
+  const s = server();
+  const codes = ['ABC234', 'ABC234', 'XYZ789'];
+  s.env.code = () => codes.shift();
+  const made = await s.call('POST', '/v1/duel', { uid: uid(1), nick: 'Ana', seed: 123456789, time: 151 });
+  assert.equal(made.status, 200);
+  assert.equal(made.data.code, 'ABC234');
+  assert.equal(made.data.seed, 123456789);
+  assert.equal(made.data.by, 'Ana');
+  assert.deepEqual(made.data.me, { time: 151, rank: 1 });
+  /* otro reto: el primer código que sale ya existe, así que se usa el siguiente */
+  const other = await s.call('POST', '/v1/duel', { uid: uid(2), nick: 'Beto', seed: 5, time: 30 });
+  assert.equal(other.data.code, 'XYZ789');
+  /* Beto consulta el reto de Ana (el código se acepta en minúsculas y con espacios) y lo juega */
+  const seen = await s.call('GET', '/v1/duel?code=abc%20234&uid=' + uid(2));
+  assert.equal(seen.data.seed, 123456789);
+  assert.equal(seen.data.by, 'Ana');
+  assert.equal(seen.data.me, null);
+  s.env.now += 1000;
+  const played = await s.call('POST', '/v1/duel/score', { code: 'ABC234', uid: uid(2), nick: 'Beto', time: 170 });
+  assert.deepEqual(
+    played.data.top.map((x) => x.nick + ' ' + x.time),
+    ['Beto 170', 'Ana 151'],
+  );
+  assert.deepEqual(played.data.me, { time: 170, rank: 1 });
+  /* Ana ve que la pasaron */
+  const back = await s.call('GET', '/v1/duel?code=ABC234&uid=' + uid(1));
+  assert.deepEqual(back.data.me, { time: 151, rank: 2 });
+  assert.equal(JSON.stringify(back.data).includes('jugador'), false, 'no se entregan identificadores');
+  /* los retos no se mezclan con la copa ni entre sí */
+  assert.equal((await s.call('GET', '/v1/cup')).data.total, 0);
+  assert.equal((await s.call('GET', '/v1/duel?code=XYZ789')).data.total, 1);
+});
+
+test('los retos rechazan lo que no sirve', async () => {
+  const s = server();
+  s.env.code = () => 'ABC234';
+  assert.equal((await s.call('GET', '/v1/duel?code=NOEXIS')).status, 404);
+  assert.equal((await s.call('POST', '/v1/duel/score', { code: 'NOEXIS', uid: uid(1), nick: 'Ana', time: 10 })).status, 404);
+  assert.equal((await s.call('POST', '/v1/duel', { uid: uid(1), nick: 'Ana', seed: -1, time: 10 })).status, 400);
+  assert.equal((await s.call('POST', '/v1/duel', { uid: uid(1), nick: 'Ana', seed: 1.5, time: 10 })).status, 400);
+  assert.equal((await s.call('POST', '/v1/duel', { uid: uid(1), nick: 'Ana', seed: 7, time: 0 })).status, 400);
+  assert.equal((await s.call('POST', '/v1/duel', { uid: uid(1), nick: 'A', seed: 7, time: 10 })).status, 400);
+  assert.equal((await s.call('POST', '/v1/duel', { uid: uid(1), nick: 'Ana', seed: 7, time: 10 })).status, 200);
+  /* si el código se repite una y otra vez, no se queda dando vueltas */
+  assert.equal((await s.call('POST', '/v1/duel', { uid: uid(1), nick: 'Ana', seed: 8, time: 10 })).status, 500);
+  /* sin generador de pruebas, el código real tiene 6 caracteres de los permitidos */
+  delete s.env.code;
+  const real = await s.call('POST', '/v1/duel', { uid: uid(3), nick: 'Caro', seed: 9, time: 10 });
+  assert.match(real.data.code, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+});
+

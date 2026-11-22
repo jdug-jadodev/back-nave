@@ -5,6 +5,7 @@ El juego está en otro proyecto: `C:\Users\Usuario\Documents\juego-nave`.
 Un programa pequeño para Cloudflare (Workers + base de datos D1) que hace dos cosas:
 
 - **Copa semanal:** guarda el mejor tiempo de cada jugador en Supervivencia y entrega la tabla de la semana.
+- **Retos entre amigos:** una pista con un código de 6 letras y su propia tabla.
 - **Medición de retorno:** anota en qué días abrió el juego cada instalación y muestra cuánta gente vuelve al día siguiente, a los 3, a los 7 y a los 30 días.
 
 No guarda datos personales: cada instalación se identifica con un número al azar y un apodo que el jugador elige.
@@ -80,3 +81,30 @@ Y en `wrangler.toml` se cambia `account_id` por el de la cuenta nueva.
 - La semana y el día se cuentan con la hora de Colombia.
 - No hay control fuerte de trampas: solo se rechazan tiempos imposibles (más de 2 horas) y datos mal formados. Alcanza entre amigos; para un público abierto habría que validar las partidas.
 - La tabla es una sola para todos. Con muchos jugadores convendría partirla en grupos.
+
+## Cuentas: guardar el progreso del jugador
+
+Las reglas están en `src/cuentas.js` (léelo: arriba explica todo el recorrido). Resumen:
+
+- Se entra solo con Google. El servidor no ve ni guarda contraseñas, correos ni nombres.
+- De la persona guarda una huella con secreto de su número de cuenta de Google; de la sesión, la huella de la llave; y el progreso (el mismo archivo que el juego guarda en el teléfono).
+- Guardar exige la versión que el juego conocía: si otro teléfono guardó después, contesta 409 con lo que hay, y el juego le pregunta al jugador con cuál se queda.
+- `DELETE /v1/account` borra la cuenta, sus sesiones y su progreso.
+
+**Mientras no estén configurados `AUTH_SECRET` y `GOOGLE_CLIENT_ID`, las cuentas contestan 503 y todo lo demás funciona igual.**
+
+Para encenderlas (una sola vez):
+
+1. En Google Cloud (con la cuenta de negocios): crear un proyecto, configurar la pantalla de consentimiento, y crear dos credenciales de OAuth:
+   - una de tipo **Aplicación web** → su identificador de cliente es el `GOOGLE_CLIENT_ID`;
+   - una de tipo **Android** con el paquete `com.giroestelar` y la huella SHA-1 de la firma de la app.
+2. Crear las tablas nuevas: `node cf.mjs d1 execute giro-estelar --remote --file schema.sql`
+3. El secreto del servidor (un texto largo al azar, que no se guarda en ningún archivo): `node cf.mjs secret put AUTH_SECRET`
+4. El identificador de Google, en `wrangler.toml`:  `[vars]` · `GOOGLE_CLIENT_ID = "…apps.googleusercontent.com"`
+5. `npm run publicar`
+6. En el juego: el mismo identificador en `app/cuenta.properties` (`googleClientId=`), compilar e instalar.
+
+Si el `AUTH_SECRET` se cambia, las cuentas existentes dejan de encontrarse (cada persona quedaría con una cuenta nueva y vacía): no se cambia.
+
+Para probar en el computador no hace falta nada de eso: `node local.mjs` trae un "Google" de mentira (ver el comentario al comienzo de `local.mjs`).
+

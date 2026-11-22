@@ -7,10 +7,16 @@
  *
  *   POST /v1/score    { uid, nick, week, time }   anota el mejor tiempo de la semana y devuelve la tabla
  *   GET  /v1/cup?uid=…                            solo la tabla
+ *   POST /v1/duel       { uid, nick, seed, time }   crea un reto y devuelve su código
+ *   GET  /v1/duel?code=…&uid=…                    la pista de un reto y su tabla
+ *   POST /v1/duel/score { code, uid, nick, time }   anota un tiempo en un reto
  *   POST /v1/visits   { uid, first, days: [] }    días en que se abrió el juego (sin datos personales)
  *   GET  /panel?key=…                             página con cuánta gente vuelve (solo con la clave)
  *   GET  /v1/stats?key=…                          lo mismo, en datos
+ *   /v1/auth/…, /v1/save, /v1/account             cuentas y progreso guardado: ver cuentas.js
  */
+import { accounts } from './cuentas.js';
+import { CORS, bad, body, json } from './respuestas.js';
 
 export const TZ_MIN = -300; // la semana y el día se cuentan con la hora de Colombia
 export const TOP = 20; // cuántos se muestran en la tabla
@@ -45,55 +51,96 @@ export const cleanNick = (text) =>
     .trim();
 const validUid = (uid) => typeof uid === 'string' && /^[a-z0-9]{16,40}$/.test(uid);
 
-/* ---------- respuestas ---------- */
-const CORS = {
-  'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'content-type',
-  'access-control-allow-private-network': 'true',
-};
-const json = (data, status = 200) =>
-  new Response(JSON.stringify(data), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...CORS },
-  });
-const bad = (why, status = 400) => json({ error: why }, status);
-async function body(request) {
-  const text = await request.text();
-  if (text.length > 4000) return null;
-  try {
-    const data = JSON.parse(text);
-    return data && typeof data === 'object' ? data : null;
-  } catch (e) {
-    return null;
-  }
+/* ---------- las tablas ----------
+   Todas las tablas se guardan igual: una clave, y el mejor tiempo de cada jugador bajo esa clave.
+   La copa de la semana usa como clave la fecha de su lunes; un reto, "r" más su código. */
+async function board(store, key, uid) {
+  const rows = await store.top(key, TOP),
+    mine = validUid(uid) ? await store.mine(key, uid) : null;
+  return {
+    total: await store.total(key),
+    top: rows.map((r) => ({ nick: r.nick, time: r.time, ...(r.uid === uid ? { me: true } : {}) })),
+    me: mine ? { time: mine.time, rank: 1 + (await store.ahead(key, mine.time, mine.at)) } : null,
+  };
+}
+/* lo que trae una marca: devuelve { nick, time } o el texto del error */
+function scoreOf(b) {
+  const nick = cleanNick(b.nick),
+    time = Math.floor(Number(b.time));
+  if (!validUid(b.uid)) return 'identificador inválido';
+  if (nick.length < 2) return 'apodo inválido';
+  if (!(time >= 1 && time <= MAX_TIME)) return 'tiempo inválido';
+  return { nick, time };
 }
 
-/* ---------- la copa ---------- */
+/* ---------- la copa de la semana ---------- */
 async function table(store, now, uid) {
-  const week = weekOf(now),
-    rows = await store.top(week.key, TOP),
-    mine = validUid(uid) ? await store.mine(week.key, uid) : null;
-  return {
-    week: week.key,
-    ends: week.ends,
-    total: await store.total(week.key),
-    top: rows.map((r) => ({ nick: r.nick, time: r.time, ...(r.uid === uid ? { me: true } : {}) })),
-    me: mine ? { time: mine.time, rank: 1 + (await store.ahead(week.key, mine.time, mine.at)) } : null,
-  };
+  const week = weekOf(now);
+  return { week: week.key, ends: week.ends, ...(await board(store, week.key, uid)) };
 }
 async function postScore(request, store, now) {
   const b = await body(request);
   if (!b) return bad('datos ilegibles');
-  const nick = cleanNick(b.nick),
-    time = Math.floor(Number(b.time));
-  if (!validUid(b.uid)) return bad('identificador inválido');
-  if (nick.length < 2) return bad('apodo inválido');
-  if (!(time >= 1 && time <= MAX_TIME)) return bad('tiempo inválido');
+  const sc = scoreOf(b);
+  if (typeof sc === 'string') return bad(sc);
   /* una marca de otra semana (guardada sin conexión) ya no cuenta: solo se devuelve la tabla */
   const current = weekOf(now).key;
-  if (b.week === current) await store.putScore(current, b.uid, nick, time, now);
+  if (b.week === current) await store.putScore(current, b.uid, sc.nick, sc.time, now);
   return json({ ...(await table(store, now, b.uid)), saved: b.week === current });
+}
+
+/* ---------- retos entre amigos ----------
+   Un reto es una pista (su semilla) con tabla propia. Quien lo crea juega la pista, recibe un
+   código de 6 letras y se lo manda a sus amigos; ellos juegan esa misma pista contra su tiempo. */
+const LETTERS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sin 0/O ni 1/I/L, que se confunden al dictarlos
+export const cleanCode = (text) =>
+  String(text ?? '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 6);
+function randomCode() {
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (x) => LETTERS[x % LETTERS.length]).join('');
+}
+const duelView = async (store, d, uid) => ({
+  code: d.code,
+  seed: d.seed,
+  by: d.nick,
+  ...(await board(store, 'r' + d.code, uid)),
+});
+/* crear un reto: llega la semilla de la pista y el tiempo de quien lo crea */
+async function postDuel(request, env) {
+  const { store, now } = env,
+    b = await body(request);
+  if (!b) return bad('datos ilegibles');
+  const sc = scoreOf(b);
+  if (typeof sc === 'string') return bad(sc);
+  if (!Number.isInteger(b.seed) || b.seed < 0 || b.seed > 4294967295) return bad('pista inválida');
+  /* el código sale al azar; si ya existe (casi imposible), se prueba con otro */
+  for (let tries = 0; tries < 6; tries++) {
+    const code = (env.code || randomCode)();
+    if (!(await store.putDuel(code, b.seed, b.uid, sc.nick, now))) continue;
+    await store.putScore('r' + code, b.uid, sc.nick, sc.time, now);
+    return json(await duelView(store, await store.duel(code), b.uid));
+  }
+  return bad('no se pudo crear el reto', 500);
+}
+/* jugar un reto que ya existe: se anota el tiempo y se devuelve su tabla */
+async function postDuelScore(request, env) {
+  const { store, now } = env,
+    b = await body(request);
+  if (!b) return bad('datos ilegibles');
+  const sc = scoreOf(b);
+  if (typeof sc === 'string') return bad(sc);
+  const d = await store.duel(cleanCode(b.code));
+  if (!d) return bad('ese reto no existe', 404);
+  await store.putScore('r' + d.code, b.uid, sc.nick, sc.time, now);
+  return json(await duelView(store, d, b.uid));
+}
+async function getDuel(url, store) {
+  const d = await store.duel(cleanCode(url.searchParams.get('code')));
+  return d ? json(await duelView(store, d, url.searchParams.get('uid'))) : bad('ese reto no existe', 404);
 }
 
 /* ---------- medición: días en que se abrió el juego ---------- */
@@ -183,16 +230,21 @@ ${s.rows.map((r) => `<tr><td>${esc(r.day)}</td><td>${r.n}</td>${pct(r.d1, r.n)}$
 }
 
 /* ---------- entrada ---------- */
-/** env = { store, now, adminKey } */
+/** env = { store, now, adminKey } y, para las cuentas, { secret, googleIds, googleKeys, ip } */
 export async function handle(request, env) {
   const url = new URL(request.url),
     path = url.pathname.replace(/\/+$/, '') || '/',
     { store, now } = env;
   try {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+    const acc = await accounts(request, env, path);
+    if (acc) return acc;
     if (request.method === 'POST' && path === '/v1/score') return await postScore(request, store, now);
     if (request.method === 'POST' && path === '/v1/visits') return await postVisits(request, store, now);
     if (request.method === 'GET' && path === '/v1/cup') return json(await table(store, now, url.searchParams.get('uid')));
+    if (request.method === 'POST' && path === '/v1/duel') return await postDuel(request, env);
+    if (request.method === 'POST' && path === '/v1/duel/score') return await postDuelScore(request, env);
+    if (request.method === 'GET' && path === '/v1/duel') return await getDuel(url, store);
     if (request.method === 'GET' && (path === '/panel' || path === '/v1/stats')) {
       if (!env.adminKey || url.searchParams.get('key') !== env.adminKey) return bad('clave incorrecta', 403);
       const s = await stats(store, now);
