@@ -9,3 +9,8 @@ account_id = "45618f9ff163708f646dbc1030dc1dc5"
 binding = "DB"
 database_name = "giro-estelar"
 database_id = "40d1b80c-2f19-4b28-82cd-ca874bdd695c"
+
+# Cuentas: el identificador de cliente de Google (tipo "Aplicación web"). Es público: es el mismo
+# que lleva la app. El secreto de las cuentas (AUTH_SECRET) no va aquí: es un "secret" de Cloudflare.
+[vars]
+GOOGLE_CLIENT_ID = "847475634818-4pnje7dmoeavbemaics9ql6gh6tfjrrs.apps.googleusercontent.com"
