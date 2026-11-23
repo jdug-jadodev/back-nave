@@ -91,6 +91,7 @@ Y en `wrangler.toml` se cambia `account_id` por el de la cuenta nueva.
 | `src/tiquetes.js` | Tiquete de partida de la copa: la marca solo entra si el tiempo cabe en el reloj real. |
 | `src/tope.js` | Tope de monedas: nota un progreso retocado a mano y deja a esa instalación fuera de la copa. |
 | `src/precios.js` | Precios de las piezas. Lo genera el juego (`juego-nave/juego/tools/precios.mjs`): no se edita a mano. |
+| `src/privacidad.js` | Política de privacidad, pública: `/privacidad` (español) y `/privacy` (inglés). La piden Google Play y AdMob. Si cambia qué datos se usan, se cambia el texto y su fecha. |
 
 ## Seguridad: qué frena el abuso
 

@@ -31,6 +31,7 @@
 import { purchases } from './compras.js';
 import { accounts } from './cuentas.js';
 import { UNIT, clientKey, tooMany } from './limites.js';
+import { privacyResponse } from './privacidad.js';
 import { CORS, bad, body, json, sameSecret, validUid } from './respuestas.js';
 import { SLACK, ticketFor, ticketStart } from './tiquetes.js';
 import { audit } from './tope.js';
@@ -466,6 +467,13 @@ export async function handle(request, env) {
           })
         : json(s);
     }
+    /* la política de privacidad: una página pública, en español y en inglés (privacidad.js) */
+    if (request.method === 'GET' && (path === '/privacidad' || path === '/privacy'))
+      return privacyResponse(path === '/privacy' ? 'en' : 'es', {
+        weeks: KEEP_WEEKS,
+        duelDays: KEEP_DUEL_DAYS,
+        visitDays: KEEP_VISIT_DAYS,
+      });
     if (path === '/') return json({ ok: true, name: 'giro-estelar' });
     return bad('no existe', 404);
   } catch (e) {

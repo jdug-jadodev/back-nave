@@ -391,3 +391,27 @@ test('administración: la clave va en la cabecera, se frena a quien la prueba a 
   assert.equal((await admin('GET', '/v1/stats', null, 'undefined')).status, 403);
   assert.equal((await admin('GET', '/v1/stats?key=')).status, 403);
 });
+
+test('la política de privacidad está en español y en inglés, con el contacto y los plazos de verdad', async () => {
+  const s = server();
+  const es = await s.call('GET', '/privacidad'),
+    en = await s.call('GET', '/privacy');
+  assert.equal(es.status, 200);
+  assert.equal(en.status, 200);
+  assert.match(es.data, /<html lang="es">/);
+  assert.match(en.data, /<html lang="en">/);
+  for (const page of [es.data, en.data]) {
+    assert.match(page, /mailto:astrionspace\.game@gmail\.com/, 'trae el correo de contacto');
+    assert.match(page, /AdMob/);
+    assert.match(page, /Cloudflare/);
+    assert.match(page, new RegExp(': ' + KEEP_VISIT_DAYS + ' (días|days)'), 'el plazo de la medición sale de reglas.js');
+    assert.doesNotMatch(page, /<script/i, 'una página sin código');
+    assert.doesNotMatch(page, /undefined|NaN|\$\{/, 'sin huecos en el texto');
+  }
+  assert.match(es.data, /Borrar mi cuenta y lo guardado/, 'nombra la opción del juego tal como aparece');
+  assert.match(es.data, /menores de 13 años/);
+  /* es pública (sin clave) y no acepta otra cosa que leerla */
+  const r = await handle(new Request('http://x/privacidad'), s.env);
+  assert.match(r.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.equal((await s.call('POST', '/privacidad', {})).status, 404);
+});
