@@ -14,3 +14,23 @@ database_id = "40d1b80c-2f19-4b28-82cd-ca874bdd695c"
 # que lleva la app. El secreto de las cuentas (AUTH_SECRET) no va aquí: es un "secret" de Cloudflare.
 [vars]
 GOOGLE_CLIENT_ID = "847475634818-4pnje7dmoeavbemaics9ql6gh6tfjrrs.apps.googleusercontent.com"
+
+# Limpieza diaria (ver cleanup en src/reglas.js): bota lo vencido y lo que ya no sirve, para que
+# la base no crezca sin fin. A las 8:17 UTC, que son las 3:17 de la madrugada en Colombia.
+[triggers]
+crons = ["17 8 * * *"]
+
+# Primera capa de límites (ver gateOf en src/worker.js y src/limites.js): el servicio de límites
+# de Cloudflare frena a quien va demasiado rápido ANTES de tocar la base de datos, sin gastar
+# cuota. Cuenta por cliente y ruta: 40 peticiones por minuto es mucho más de lo que hace el
+# juego. Es aproximado y por región (lo dice la documentación): los topes exactos siguen siendo
+# los de limites.js. Formato tomado de la documentación de Cloudflare el 2026-11-22
+# (developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit); pide wrangler 4.36 o más.
+# Si al publicar Cloudflare rechaza este bloque, se puede quitar: el servidor funciona sin él.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 40
+  period = 60

@@ -2,7 +2,7 @@
   "name": "giro-estelar-servidor",
   "private": true,
   "version": "0.1.0",
-  "description": "Servidor de Giro Estelar en Cloudflare: copa semanal y medición de retorno",
+  "description": "Servidor de Astrion Space en Cloudflare: copa semanal y medición de retorno",
   "type": "module",
   "scripts": {
     "test": "node --test",

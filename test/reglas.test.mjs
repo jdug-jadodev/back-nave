@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { memoryStore } from '../src/almacenes.js';
-import { cleanNick, dayFromKey, handle, weekOf } from '../src/reglas.js';
+import { LIMITS } from '../src/limites.js';
+import { KEEP_VISIT_DAYS, MAX_DAYS, cleanNick, cleanup, dayFromKey, dayOf, handle, weekOf } from '../src/reglas.js';
+import { ticketFor } from '../src/tiquetes.js';
 
 /* hora de Colombia → instante */
 const at = (y, m, d, h = 12, min = 0) => Date.UTC(y, m - 1, d, h + 5, min);
@@ -9,7 +11,7 @@ const FRI = at(2026, 11, 20); // viernes
 const uid = (n) => 'jugador' + String(n).padStart(12, '0');
 
 function server(now = FRI) {
-  const env = { store: memoryStore(), now, adminKey: 'secreta' };
+  const env = { store: memoryStore(), now, adminKey: 'secreta', secret: 'secreto-de-prueba' };
   const call = async (method, path, data) => {
     const r = await handle(
       new Request('http://x' + path, { method, body: data === undefined ? undefined : JSON.stringify(data) }),
@@ -18,7 +20,10 @@ function server(now = FRI) {
     const text = await r.text();
     return { status: r.status, data: r.headers.get('content-type').includes('json') ? JSON.parse(text) : text };
   };
-  return { env, call, score: (n, nick, time, week = '2026-11-16') => call('POST', '/v1/score', { uid: uid(n), nick, week, time }) };
+  /* una marca como la manda el juego: con el tiquete de una partida que empezó hace justo ese tiempo */
+  const score = async (n, nick, time, week = '2026-11-16') =>
+    call('POST', '/v1/score', { uid: uid(n), nick, week, time, ticket: await ticketFor(env.secret, uid(n), env.now - time * 1000) });
+  return { env, call, score };
 }
 
 test('la semana va de lunes a domingo, con la hora de Colombia', () => {
@@ -61,6 +66,7 @@ test('solo cuenta el mejor tiempo; un tiempo peor no lo baja pero sí cambia el 
   const r = await s.score(1, 'Anita', 90);
   assert.equal(r.data.me.time, 150);
   assert.equal(r.data.top[0].nick, 'Anita');
+  s.env.now += 60000; // otra partida, más tarde
   assert.equal((await s.score(1, 'Anita', 180)).data.me.time, 180);
 });
 
@@ -197,3 +203,191 @@ test('los retos rechazan lo que no sirve', async () => {
   assert.match(real.data.code, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
 });
 
+/* ---------- abuso: límites, limpieza y administración ---------- */
+
+test('las rutas que escriben sin cuenta tienen un tope por cliente', async () => {
+  const s = server();
+  s.env.ip = '10.0.0.7';
+  const post = (path, data) => s.call('POST', path, data);
+  const flood = async (n, make) => {
+    let last;
+    for (let i = 0; i < n; i++) last = await make(i);
+    return last;
+  };
+  /* marcas en la copa, cada una con un identificador distinto (como haría quien quiere llenar la tabla) */
+  const [scores] = LIMITS.score;
+  assert.equal((await flood(scores, (i) => s.score(i, 'Bot' + i, 50))).status, 200);
+  assert.equal((await s.score(999, 'Bot', 50)).status, 429);
+  assert.equal((await s.call('GET', '/v1/cup')).data.total, scores, 'lo frenado no entró');
+  /* retos */
+  const [duels] = LIMITS.duel;
+  assert.equal((await flood(duels, (i) => post('/v1/duel', { uid: uid(i), nick: 'Bot', seed: i, time: 30 }))).status, 200);
+  assert.equal((await post('/v1/duel', { uid: uid(1), nick: 'Bot', seed: 1, time: 30 })).status, 429);
+  /* medición */
+  const [visits] = LIMITS.visits;
+  assert.equal((await flood(visits, (i) => post('/v1/visits', { uid: uid(i), first: '2026-11-19', days: [0] }))).status, 200);
+  assert.equal((await post('/v1/visits', { uid: uid(1), first: '2026-11-19', days: [0] })).status, 429);
+  /* a otro cliente no lo afecta, y pasada la ventana se puede otra vez */
+  s.env.ip = '10.0.0.8';
+  assert.equal((await s.score(500, 'Otra', 50)).status, 200);
+  s.env.ip = '10.0.0.7';
+  s.env.now += LIMITS.score[1];
+  assert.equal((await s.score(501, 'Luego', 50)).status, 200);
+  /* marcas en retos: mismo tope */
+  s.env.ip = '10.0.0.9';
+  const d = await post('/v1/duel', { uid: uid(1), nick: 'Ana', seed: 5, time: 30 });
+  const [ds] = LIMITS.duelScore;
+  await flood(ds, (i) => post('/v1/duel/score', { code: d.data.code, uid: uid(i), nick: 'Bot', time: 20 }));
+  assert.equal((await post('/v1/duel/score', { code: d.data.code, uid: uid(1), nick: 'Bot', time: 20 })).status, 429);
+});
+
+test('la capa de límites de la plataforma, si está, frena antes de tocar la base', async () => {
+  const s = server();
+  let writes = 0;
+  s.env.store = new Proxy(s.env.store, {
+    get: (store, name) => (name === 'bump' || name.startsWith('put') ? (...a) => (writes++, store[name](...a)) : store[name]),
+  });
+  const asked = [];
+  s.env.gate = async (key) => (asked.push(key), false);
+  assert.equal((await s.score(1, 'Ana', 50)).status, 429);
+  assert.equal(writes, 0, 'ni una escritura');
+  assert.match(asked[0], /^score:/);
+  s.env.gate = async () => true;
+  assert.equal((await s.score(1, 'Ana', 50)).status, 200);
+});
+
+test('de un envío de la medición se anotan como mucho los días más recientes', async () => {
+  const s = server(at(2026, 11, 20));
+  const today = dayOf(s.env.now);
+  /* 400 días de una sola vez: se quedan los 60 más recientes */
+  const r = await s.call('POST', '/v1/visits', { uid: uid(1), first: '2025-10-17', days: Array.from({ length: 400 }, (_, i) => i) });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.n, MAX_DAYS);
+  assert.equal(await s.env.store.active(today - 1), 1);
+  assert.equal(await s.env.store.active(today - MAX_DAYS - 5), 0);
+  /* lo más viejo de lo que se conserva ni se anota */
+  const old = await s.call('POST', '/v1/visits', { uid: uid(2), first: '2025-01-01', days: [0, 1, 2] });
+  assert.equal(old.data.n, 0);
+  assert.equal((await s.call('POST', '/v1/visits', { uid: uid(3), first: '2026-11-19', days: Array.from({ length: 401 }, (_, i) => i) })).status, 400);
+});
+
+test('una marca no puede ser más larga que lo que lleva la semana', async () => {
+  const s = server(at(2026, 11, 16, 0, 30)); // lunes, media hora después de empezar la copa
+  assert.equal((await s.score(1, 'Tramposo', 7200)).status, 400, 'dos horas aguantadas en media hora de semana');
+  assert.equal((await s.score(1, 'Honesto', 1500)).status, 200);
+  s.env.now = at(2026, 11, 16, 3, 0);
+  assert.equal((await s.score(2, 'Largo', 7200)).status, 200, 'ya pasó tiempo de sobra');
+});
+
+test('datos con forma rara dan error de datos, no de servidor', async () => {
+  const s = server();
+  const post = (data) => s.call('POST', '/v1/score', data);
+  assert.equal((await post({ uid: uid(1), nick: { toString: 1 }, week: '2026-11-16', time: 50 })).status, 400);
+  assert.equal((await post({ uid: uid(1), nick: ['Ana'], week: '2026-11-16', time: 50 })).status, 400);
+  assert.equal((await post({ uid: uid(1), nick: 'Ana', week: '2026-11-16', time: '0x1C20' })).status, 400, 'el tiempo es un número');
+  assert.equal((await post({ uid: { length: 20 }, nick: 'Ana', week: '2026-11-16', time: 50 })).status, 400);
+  assert.equal((await s.call('GET', '/v1/cup')).data.total, 0);
+});
+
+test('el total de la tabla y el puesto se recuerdan unos segundos; quien anota ve lo suyo al instante', async () => {
+  const s = server();
+  let counts = 0;
+  s.env.store = new Proxy(s.env.store, {
+    get: (store, name) => (name === 'total' || name === 'ahead' ? (...a) => (counts++, store[name](...a)) : store[name]),
+  });
+  s.env.cache = new Map();
+  for (let i = 1; i <= 5; i++) await s.score(i, 'Jug' + i, 100 + i);
+  counts = 0;
+  for (let i = 0; i < 10; i++) {
+    const r = await s.call('GET', '/v1/cup?uid=' + uid(2));
+    assert.equal(r.data.total, 5);
+    assert.deepEqual(r.data.me, { time: 102, rank: 4 });
+  }
+  assert.ok(counts <= 2, 'diez consultas, y la tabla se contó ' + counts + ' veces');
+  /* quien acaba de anotar ve sus números recién contados, no los recordados */
+  const mine = await s.score(6, 'Nueva', 500);
+  assert.equal(mine.data.total, 6);
+  assert.deepEqual(mine.data.me, { time: 500, rank: 1 });
+  /* y los demás ven el cambio en su siguiente consulta */
+  assert.deepEqual((await s.call('GET', '/v1/cup?uid=' + uid(2))).data.me, { time: 102, rank: 5 });
+  /* lo recordado vence solo: pasado el rato se vuelve a contar */
+  counts = 0;
+  s.env.now += 31000;
+  await s.call('GET', '/v1/cup?uid=' + uid(2));
+  assert.equal(counts, 2);
+  /* sin memoria (las pruebas, el servidor local) se cuenta siempre: mismos números */
+  delete s.env.cache;
+  assert.equal((await s.call('GET', '/v1/cup')).data.total, 6);
+});
+
+test('la limpieza diaria bota copas viejas, retos abandonados y medición antigua', async () => {
+  const s = server(at(2026, 11, 20));
+  const store = s.env.store;
+  await store.putScore('2026-08-31', uid(1), 'Vieja', 80, 1);
+  await store.putScore('2026-10-12', uid(1), 'Reciente', 80, 1);
+  await s.score(1, 'Ana', 120);
+  const old = s.env.now - 45 * 86400000;
+  await store.putDuel('VIEJO2', 1, uid(1), 'Ana', old);
+  await store.putScore('rVIEJO2', uid(1), 'Ana', 40, old);
+  const duel = await s.call('POST', '/v1/duel', { uid: uid(2), nick: 'Beto', seed: 9, time: 30 });
+  const today = dayOf(s.env.now);
+  await store.putVisits(uid(1), today - 300, [today - 300, today - KEEP_VISIT_DAYS - 1, today - 20, today]);
+
+  const gone = await cleanup(store, s.env.now);
+  assert.deepEqual(gone, { scores: 1, duels: 1, visits: 2 });
+  assert.equal(await store.total('2026-08-31'), 0, 'la copa de hace tres meses');
+  assert.equal(await store.total('2026-10-12'), 1, 'la de hace un mes se conserva');
+  assert.equal((await s.call('GET', '/v1/cup')).data.total, 1, 'la de esta semana, intacta');
+  assert.equal((await s.call('GET', '/v1/duel?code=VIEJO2')).status, 404, 'el reto abandonado');
+  assert.equal((await s.call('GET', '/v1/duel?code=' + duel.data.code)).status, 200, 'el reciente sigue');
+  assert.equal(await store.active(today - 20), 1);
+  assert.deepEqual(await cleanup(store, s.env.now), { scores: 0, duels: 0, visits: 0 }, 'repetirla no borra nada más');
+});
+
+test('administración: la clave va en la cabecera, se frena a quien la prueba a la fuerza, y se puede sacar a un tramposo', async () => {
+  const s = server();
+  s.env.ip = '10.9.9.9';
+  const admin = async (method, path, data, key) => {
+    const r = await handle(
+      new Request('http://x' + path, { method, headers: key ? { authorization: 'Bearer ' + key } : {}, body: data ? JSON.stringify(data) : undefined }),
+      s.env,
+    );
+    return { status: r.status, headers: r.headers, text: await r.text() };
+  };
+  assert.equal((await admin('GET', '/v1/stats', null, 'secreta')).status, 200, 'por cabecera, sin dejarla en la dirección');
+  assert.equal((await admin('GET', '/v1/stats?key=secreta')).status, 200, 'en la dirección sigue sirviendo, para el navegador');
+  assert.equal((await admin('GET', '/v1/stats', null, 'secret')).status, 403);
+  assert.equal((await admin('GET', '/v1/stats', null, 'secretaa')).status, 403);
+  assert.equal((await admin('GET', '/v1/stats')).status, 403);
+  assert.equal((await admin('GET', '/panel?key=secreta')).headers.get('referrer-policy'), 'no-referrer');
+
+  /* un tramposo en la punta de la tabla */
+  await s.score(1, 'Ana', 120);
+  await s.score(66, 'Tramposo', 7000);
+  assert.equal((await s.call('GET', '/v1/cup')).data.top[0].nick, 'Tramposo');
+  assert.equal((await admin('POST', '/v1/admin/ban', { uid: uid(66) })).status, 403, 'sin clave no');
+  const ban = await admin('POST', '/v1/admin/ban', { uid: uid(66) }, 'secreta');
+  assert.equal(ban.status, 200);
+  assert.equal(JSON.parse(ban.text).removed, 1);
+  assert.deepEqual(
+    (await s.call('GET', '/v1/cup')).data.top.map((r) => r.nick),
+    ['Ana'],
+  );
+  const again = await s.score(66, 'Tramposo', 7100);
+  assert.equal(again.data.saved, false, 'sus marcas ya no se guardan');
+  assert.equal(again.data.total, 1);
+  assert.equal((await s.call('POST', '/v1/duel', { uid: uid(66), nick: 'Tramposo', seed: 1, time: 30 })).status, 403);
+  assert.equal((await admin('POST', '/v1/admin/unban', { uid: uid(66) }, 'secreta')).status, 200);
+  assert.equal((await s.score(66, 'Arrepentido', 90)).data.saved, true);
+
+  /* adivinar la clave a la fuerza: se frena */
+  let last;
+  for (let i = 0; i <= 25; i++) last = await admin('GET', '/v1/stats', null, 'intento' + i);
+  assert.equal(last.status, 429);
+  assert.equal((await admin('GET', '/v1/stats', null, 'secreta')).status, 200, 'con la clave buena se sigue entrando');
+  /* sin clave configurada, no hay administración */
+  delete s.env.adminKey;
+  s.env.ip = '10.9.9.10';
+  assert.equal((await admin('GET', '/v1/stats', null, 'undefined')).status, 403);
+  assert.equal((await admin('GET', '/v1/stats?key=')).status, 403);
+});
