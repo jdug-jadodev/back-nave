@@ -468,7 +468,8 @@ export async function handle(request, env) {
         : json(s);
     }
     /* la política de privacidad: una página pública, en español y en inglés (privacidad.js) */
-    if (request.method === 'GET' && (path === '/privacidad' || path === '/privacy'))
+    /* también con HEAD: así la consultan los verificadores automáticos (el de Google Play, entre ellos) */
+    if ((request.method === 'GET' || request.method === 'HEAD') && (path === '/privacidad' || path === '/privacy'))
       return privacyResponse(path === '/privacy' ? 'en' : 'es', {
         weeks: KEEP_WEEKS,
         duelDays: KEEP_DUEL_DAYS,

@@ -192,13 +192,17 @@ Para encenderlas:
 
 Para probar en el computador no hace falta nada de eso: `node local.mjs` trae un "Google Play" de mentira (`/test/store`), y en el navegador se activa con `localStorage.giro_store = 'prueba'`.
 
-## Publicar lo que está pendiente (en espera)
+## Publicar lo que está pendiente
 
-Desde el 2026-11-22 hay cambios sin publicar: las compras, los arreglos de la revisión de seguridad y lo de contra las trampas (tiquete de partida, lista de revisión, tope de monedas). Cuando se decida publicar, en este orden:
+**Publicado el 2026-11-23**: migración, tablas nuevas y código (compras, arreglos de seguridad, tiquete de partida, lista de revisión, tope de monedas y política de privacidad). Antes se sacó una copia de la base (`Documents\giro-estelar-llavesespaldo-base-2026-11-23.sql`, fuera del repositorio). Comprobado en vivo: `/privacidad` y `/privacy`, el tiquete de partida, el rechazo de marcas sin tiquete, el panel con su clave, el límite de la plataforma y el reloj de la limpieza. **La migración ya está aplicada: no se vuelve a correr.** Falta `PLAY_SERVICE_ACCOUNT` (sin él las compras no se pueden verificar).
+
+Lo que sigue es el procedimiento, para la próxima vez que haya cambios:
+
+En este orden:
 
 ```
 npm test
-node cf.mjs d1 execute giro-estelar --remote --file=migracion-2026-11-22.sql -y   # UNA sola vez: agrega una columna a las sesiones y otra a las marcas
+# (la migración migracion-2026-11-22.sql ya se aplicó el 2026-11-23: no repetir)
 node cf.mjs d1 execute giro-estelar --remote --file=schema.sql -y                  # tablas e índices nuevos (no toca lo que ya hay)
 node cf.mjs deploy                                                                 # publica el código y el reloj de la limpieza diaria
 ```

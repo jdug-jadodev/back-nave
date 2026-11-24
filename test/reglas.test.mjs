@@ -414,4 +414,7 @@ test('la política de privacidad está en español y en inglés, con el contacto
   const r = await handle(new Request('http://x/privacidad'), s.env);
   assert.match(r.headers.get('content-security-policy'), /default-src 'none'/);
   assert.equal((await s.call('POST', '/privacidad', {})).status, 404);
+  /* los verificadores automáticos (Google Play) preguntan con HEAD: también tiene que contestar que existe */
+  for (const path of ['/privacidad', '/privacy'])
+    assert.equal((await handle(new Request('http://x' + path, { method: 'HEAD' }), s.env)).status, 200, 'HEAD ' + path);
 });
